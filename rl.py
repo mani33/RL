@@ -19,12 +19,16 @@ from sklearn.preprocessing import OneHotEncoder
 class ReplayBuffer(object):
     pass
 class Environment():
-    def __init__(self, n_subjects, n_fluid_units):
+    def __init__(self, n_subjects, n_fluid_units, max_n_infusion_per_sub, 
+                                                     vitals_data_file):
+        """vitals_data_file - csv file containing heart rate and sbp
+        example: r'C:/Users/msubramaniyan/Documents/projects/fluid_allocation
+        /data/20240810/feature_matrix_hr_sbp.csv'
+        """
         self.n_subjects = n_subjects
         self.n_fluid_units = n_fluid_units
-        # Load excel files containing state info
-        fn = r'C:\Users\msubramaniyan\Documents\projects\fluid_allocation\data\20240810\feature_matrix_hr_sbp.csv'
-        df = pd.read_csv(fn)
+        # Load excel files containing state info        
+        df = pd.read_csv(vitals_data_file)
         df.rename(columns={'y_hr':'x_hr_70'},inplace=True)
         df.rename(columns={'y_sbp':'x_sbp_70'},inplace=True)
         # Select subjects randomly
@@ -38,14 +42,20 @@ class Environment():
             sel_df.append(sdf[sdf.bleed_tour_cond==rand_bleed_cond])
         self.df = pd.concat(sel_df)
         
-        # Binary bins to code the infusion windows
-        self.n_states = 3
+        # One-hot encode the infusion windows
+        self.n_states = max_n_infusion_per_sub + 1 # 1 for terminal state
         # iwin - infusion window        
-        # code 0 - end of 10 min
-        # code 1 - end of 40 min
-        # code 2 - end of 70 min (also terminal state)
-        self.onehotencoder = OneHotEncoder().fit([[x] for x in 
+        # code [1 0 0] - end of 10 min or beginning of first infusion - S1
+        # code [0 1 0] - end of 40 min or beginning of second infusion - S2
+        # code [0 0 1] - end of 70 min or terminal state - S3
+        self.oh_encoder_iwin = OneHotEncoder().fit([[x] for x in 
                                             range(self.n_states)])
+        """ One hot encoder for fluid infusion history
+        [no_unit no_unit] - [1 0 0 0]
+        [1 0] - [0 1 0 0]
+        [0 1] - [0 0 1 0]
+        [1 1] - [0 0 0 1]
+        """
         # End of infusion window 0 - that is, the initial 10 min period end
         iwin0_end_code = self.onehotencoder.transform([[0]]).toarray()
         self.iwin_end_code = np.repeat(iwin0_end_code,n_subjects,axis=0)
@@ -72,7 +82,7 @@ class Environment():
         self.action_history_for_s = np.zeros((n_subjects,self.n_history_actions)) #
         # Create initial state
         # [a,b] in the following: [fluid in first win, fluid in second win]
-        # treat_cond: 1 - [0,0], 2 - [1,0], 3 - [0,1], and 4 - [1,1] 
+        # treat_cond: 1 - [0,0], 2 - [1,0], 3 - [0,1], and 4 - [1,1]
         tc = 1        
         hr = self.df.loc[self.df.treat_cond==tc,[f'x_hr_{x}' for x in
                         range(self.t_iwin_1_start - self.n_history_points, 
@@ -84,8 +94,8 @@ class Environment():
                                         self.action_history_for_s)) # nSub x k
         
                
-    def get_next_state(self,curr_state,action):
-        """ Get next state given action
+    def step(self, curr_state, action):
+        """ Get next state and reward when agent takes given action
         Inputs:
             curr_state - 2d numpy array of shape (n_subjects,k) where k is 
             self.n_history_points*2(hr and sbp) + self.iwin_code_bin_size + 
